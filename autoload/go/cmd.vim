@@ -335,6 +335,116 @@ function! go#cmd#Test(bang, compile, ...) abort
   execute cd . fnameescape(dir)
 endfunction
 
+" Test runs `go test` in the current directory. If compile is true, it'll
+" compile the tests instead of running them (useful to catch errors in the
+" test files). Any other argument is appendend to the final `go test` command
+function! go#cmd#TestRunner(bang, compile, ...) abort
+  let args = ["test"]
+
+  " don't run the test, only compile it. Useful to capture and fix errors.
+  if a:compile
+    let compile_file = "vim-go-test-compile"
+    call extend(args, ["-c", "-o", compile_file])
+  endif
+
+  if a:0
+    let goargs = a:000
+
+    " do not expand for coverage mode as we're passing the arg ourself
+    if a:1 != '-coverprofile'
+      " expand all wildcards(i.e: '%' to the current file name)
+      let goargs = map(copy(a:000), "expand(v:val)")
+    endif
+
+    if !(has('nvim') || go#util#has_job())
+      let goargs = go#util#Shelllist(goargs, 1)
+    endif
+
+    call extend(args, goargs, 1)
+  else
+    " only add this if no custom flags are passed
+    let timeout  = get(g:, 'go_test_timeout', '10s')
+    call add(args, printf("-timeout=%s", timeout))
+  endif
+
+  if get(g:, 'go_echo_command_info', 1)
+    if a:compile
+      echon "vim-go: " | echohl Identifier | echon "compiling tests ..." | echohl None
+    else
+      echon "vim-go: " | echohl Identifier | echon "testing ..." | echohl None
+    endif
+  endif
+
+  if go#util#has_job()
+    " use vim's job functionality to call it asynchronously
+    let job_args = {
+          \ 'cmd': ['go'] + args,
+          \ 'bang': a:bang,
+          \ }
+
+    if a:compile
+      let job_args['custom_cb'] = function('s:test_compile', [compile_file])
+    endif
+
+    call s:cmd_job(job_args)
+    return
+  elseif has('nvim')
+    " use nvims's job functionality
+    if get(g:, 'go_term_enabled', 0)
+      let id = go#term#new(a:bang, ["go"] + args)
+    else
+      let id = go#jobcontrol#Spawn(a:bang, "test", args)
+    endif
+
+    if a:compile
+      call go#jobcontrol#AddHandler(function('s:test_compile_handler'))
+      let s:test_compile_handlers[id] = compile_file
+    endif
+    return id
+  endif
+
+  call go#cmd#autowrite()
+  redraw
+
+  let command = "go " . join(args, ' ')
+  let out = go#tool#ExecuteInDir(command)
+
+  let l:listtype = "quickfix"
+
+  let cd = exists('*haslocaldir') && haslocaldir() ? 'lcd ' : 'cd '
+  let dir = getcwd()
+  execute cd fnameescape(expand("%:p:h"))
+
+  if a:compile
+    call delete(compile_file)
+  endif
+
+  if go#util#ShellError() != 0
+    let errors = go#tool#ParseErrors(split(out, '\n'))
+    let errors = go#tool#FilterValids(errors)
+
+    call go#list#Populate(l:listtype, errors, command)
+    call go#list#Window(l:listtype, len(errors))
+    if !empty(errors) && !a:bang
+      call go#list#JumpToFirst(l:listtype)
+    elseif empty(errors)
+      " failed to parse errors, output the original content
+      call go#util#EchoError(out)
+    endif
+    echon "vim-go: " | echohl ErrorMsg | echon "[test] FAIL" | echohl None
+  else
+    call go#list#Clean(l:listtype)
+    call go#list#Window(l:listtype)
+
+    if a:compile
+      echon "vim-go: " | echohl Function | echon "[test] SUCCESS" | echohl None
+    else
+      echon "vim-go: " | echohl Function | echon "[test] PASS" | echohl None
+    endif
+  endif
+  execute cd . fnameescape(dir)
+endfunction
+
 " Testfunc runs a single test that surrounds the current cursor position.
 " Arguments are passed to the `go test` command.
 function! go#cmd#TestFunc(bang, ...) abort
